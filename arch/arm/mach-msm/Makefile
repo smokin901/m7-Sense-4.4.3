@@ -727,6 +727,8 @@ obj-$(CONFIG_HTC_MONITOR) += htc_monitor.o
 obj-y += display/
 
 obj-$(CONFIG_IO_FOOTPRINT) += io_footprint.o
+obj-$(CONFIG_FORCE_FAST_CHARGE) += fastchg.o
+obj-$(CONFIG_MSM_SLEEPER) += msm-sleeper.o
 
 obj-$(CONFIG_IOEXTENDER) += ADP5585_ioextender.o
 
@@ -735,6 +737,4 @@ obj-y += htc_cpu_usage_stats.o
 
 obj-$(CONFIG_MSM_IPC_ROUTER_SECURITY)+= msm_ipc_router_security.o
 
-obj-$(CONFIG_FORCE_FAST_CHARGE) += fastchg.o
-obj-$(CONFIG_MSM_SLEEPER) += msm-sleeper.o
 obj-$(CONFIG_LCD_KCAL) += msm_kcal_ctrl.o

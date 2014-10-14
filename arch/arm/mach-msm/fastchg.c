@@ -27,11 +27,25 @@
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/fastchg.h>
-
+#include <linux/string.h>
 #define FAST_CHARGE_VERSION	"version 1.0 by Paul Reioux"
 
-int force_fast_charge;
+int force_fast_charge = 0;
 int fast_charge_level;
+
+static int __init get_fastcharge_opt(char *ffc)
+{
+	if (strcmp(ffc, "0") == 0) {
+		force_fast_charge = 0;
+	} else if (strcmp(ffc, "1") == 0) {
+		force_fast_charge = 1;
+	} else {
+		force_fast_charge = 0;
+	}
+	return 1;
+}
+
+__setup("ffc=", get_fastcharge_opt);
 
 /* sysfs interface for "force_fast_charge" */
 static ssize_t force_fast_charge_show(struct kobject *kobj,
@@ -143,16 +157,13 @@ int force_fast_charge_init(void)
 	 /* Forced fast charge disabled by default */
 	force_fast_charge = FAST_CHARGE_DISABLED;
 
-	force_fast_charge_kobj
-		= kobject_create_and_add("fast_charge", kernel_kobj);
+	force_fast_charge_kobj = kobject_create_and_add("fast_charge", kernel_kobj);
 
 	if (!force_fast_charge_kobj) {
 		return -ENOMEM;
 	}
 
-	force_fast_charge_retval
-		= sysfs_create_group(force_fast_charge_kobj,
-				&force_fast_charge_attr_group);
+	force_fast_charge_retval = sysfs_create_group(force_fast_charge_kobj, &force_fast_charge_attr_group);
 
 	if (force_fast_charge_retval)
 		kobject_put(force_fast_charge_kobj);

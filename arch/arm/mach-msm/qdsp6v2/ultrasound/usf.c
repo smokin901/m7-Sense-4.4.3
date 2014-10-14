@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,10 +26,12 @@
 #include "q6usm.h"
 #include "usfcdev.h"
 
-#define DRV_VERSION "1.4.0"
-#define USF_VERSION_ID 0x0140
+/* The driver version*/
+#define DRV_VERSION "1.6.1"
+#define USF_VERSION_ID 0x0161
 
-#define USF_TIMEOUT_JIFFIES (1*HZ) 
+/* Standard timeout in the asynchronous ops */
+#define USF_TIMEOUT_JIFFIES (1*HZ) /* 1 sec */
 
 #define USF_UNDEF_DEV_ID 0xffff
 
@@ -43,11 +45,21 @@
 #define X_IND 0
 #define Y_IND 1
 #define Z_IND 2
+ 
+/* Shared memory limits */
+/* max_buf_size = (port_size(65535*2) * port_num(8) * group_size(3) */
+#define USF_MAX_BUF_SIZE 3145680
+#define USF_MAX_BUF_NUM  32
 
+/* Place for opreation result, received from QDSP6 */
 #define APR_RESULT_IND 1
 
+/* Place for US detection result, received from QDSP6 */
 #define APR_US_DETECT_RESULT_IND 0
 
+#define BITS_IN_BYTE 8
+
+/* The driver states */
 enum usf_state_type {
 	USF_IDLE_STATE,
 	USF_OPENED_STATE,
@@ -88,24 +100,25 @@ struct usf_xx_type {
 	u8 user_upd_info_na;
 };
 
+
 struct usf_type {
-	
+	/* TX device component configuration & control */
 	struct usf_xx_type usf_tx;
-	
+	/* RX device component configuration & control */
 	struct usf_xx_type usf_rx;
-	
-	
+	/* Index into the opened device container */
+	/* To prevent mutual usage of the same device */
 	uint16_t dev_ind;
-	
+	/* Event types, supported by device */
 	uint16_t event_types;
-	
+	/*  The input devices are "input" module registered clients */
 	struct input_dev *input_ifs[USF_MAX_EVENT_IND];
-	
-	int event_src;
-	
+	/* Bitmap of types of events, conflicting to USF's ones */
 	uint16_t conflicting_event_types;
-	
+	/* Bitmap of types of events from devs, conflicting with USF */
 	uint16_t conflicting_event_filters;
+	/* The requested buttons bitmap */
+	uint16_t req_buttons_bitmap;
 };
 
 struct usf_input_dev_type {
@@ -124,15 +137,28 @@ struct usf_input_dev_type {
 			     );
 };
 
-
+/* The MAX number of the supported devices */
 #define MAX_DEVS_NUMBER	1
 
-static const int s_event_src_map[] = {
-	BTN_TOOL_PEN, 
-	0,            
-	0,            
+/*
+ * code for a special button that is used to show/hide a
+ * hovering cursor in the input framework. Must be in
+ * sync with the button code definition in the framework
+ * (EventHub.h)
+ */
+#define BTN_USF_HOVERING_CURSOR         0x230
+
+/* Supported buttons container */
+static const int s_button_map[] = {
+	BTN_STYLUS,
+	BTN_STYLUS2,
+	BTN_TOOL_PEN,
+	BTN_TOOL_RUBBER,
+	BTN_TOOL_FINGER,
+	BTN_USF_HOVERING_CURSOR
 };
 
+/* The opened devices container */
 static int s_opened_devs[MAX_DEVS_NUMBER];
 
 #define USF_NAME_PREFIX "usf_"
@@ -162,14 +188,36 @@ static int prepare_tsc_input_device(uint16_t ind,
 				struct us_input_info_type *input_info,
 				const char *name)
 {
-	struct input_dev *in_dev = allocate_dev(ind, name);
+	int i = 0;
 
+	int num_buttons = min(ARRAY_SIZE(s_button_map),
+		sizeof(input_info->req_buttons_bitmap) *
+		BITS_IN_BYTE);
+	uint16_t max_buttons_bitmap = ((1 << ARRAY_SIZE(s_button_map)) - 1);
+
+	struct input_dev *in_dev = allocate_dev(ind, name);
 	if (in_dev == NULL)
 		return -ENOMEM;
 
+	if (input_info->req_buttons_bitmap > max_buttons_bitmap) {
+		pr_err("%s: Requested buttons[%d] exceeds max buttons available[%d]\n",
+		__func__,
+		input_info->req_buttons_bitmap,
+		max_buttons_bitmap);
+		return -EINVAL;
+	}
+
 	usf_info->input_ifs[ind] = in_dev;
+	usf_info->req_buttons_bitmap =
+		input_info->req_buttons_bitmap;
 	in_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 	in_dev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
+
+	for (i = 0; i < num_buttons; i++)
+		if (input_info->req_buttons_bitmap & (1 << i))
+			in_dev->keybit[BIT_WORD(s_button_map[i])] |=
+			BIT_MASK(s_button_map[i]);
+
 	input_set_abs_params(in_dev, ABS_X,
 			     input_info->tsc_x_dim[MIN_IND],
 			     input_info->tsc_x_dim[MAX_IND],
@@ -246,6 +294,11 @@ static void notify_tsc_event(struct usf_type *usf_info,
 			     struct usf_event_type *event)
 
 {
+	int i = 0;
+	int num_buttons = min(ARRAY_SIZE(s_button_map),
+		sizeof(usf_info->req_buttons_bitmap) *
+		BITS_IN_BYTE);
+
 	struct input_dev *input_if = usf_info->input_ifs[if_ind];
 	struct point_event_type *pe = &(event->event_data.point_event);
 
@@ -259,19 +312,24 @@ static void notify_tsc_event(struct usf_type *usf_info,
 	input_report_abs(input_if, ABS_PRESSURE, pe->pressure);
 	input_report_key(input_if, BTN_TOUCH, !!(pe->pressure));
 
-	if (usf_info->event_src)
-		input_report_key(input_if, usf_info->event_src, 1);
+	for (i = 0; i < num_buttons; i++) {
+		uint16_t mask = (1 << i),
+		btn_state = !!(pe->buttons_state_bitmap & mask);
+		if (usf_info->req_buttons_bitmap & mask)
+			input_report_key(input_if, s_button_map[i], btn_state);
+	}
 
 	input_sync(input_if);
 
-	pr_debug("%s: TSC event: xyz[%d;%d;%d], incl[%d;%d], pressure[%d]\n",
+	pr_debug("%s: TSC event: xyz[%d;%d;%d], incl[%d;%d], pressure[%d], buttons[%d]\n",
 		 __func__,
 		 pe->coordinates[X_IND],
 		 pe->coordinates[Y_IND],
 		 pe->coordinates[Z_IND],
 		 pe->inclinations[X_IND],
 		 pe->inclinations[Y_IND],
-		 pe->pressure);
+		 pe->pressure,
+		 pe->buttons_state_bitmap);
 }
 
 static void notify_mouse_event(struct usf_type *usf_info,
@@ -324,6 +382,8 @@ static struct usf_input_dev_type s_usf_input_devs[] = {
 		prepare_mouse_input_device, notify_mouse_event},
 	{USF_KEYBOARD_EVENT, "usf_kb",
 		prepare_keyboard_input_device, notify_key_event},
+	{USF_TSC_EXT_EVENT, "usf_tsc_ext",
+		prepare_tsc_input_device, notify_tsc_event},
 };
 
 static void usf_rx_cb(uint32_t opcode, uint32_t token,
@@ -337,7 +397,7 @@ static void usf_rx_cb(uint32_t opcode, uint32_t token,
 	}
 
 	switch (opcode) {
-	case USM_DATA_EVENT_WRITE_DONE:
+	case Q6USM_EVENT_WRITE_DONE:
 		wake_up(&usf_xx->wait);
 		break;
 	default:
@@ -356,14 +416,14 @@ static void usf_tx_cb(uint32_t opcode, uint32_t token,
 	}
 
 	switch (opcode) {
-	case USM_DATA_EVENT_READ_DONE:
+	case Q6USM_EVENT_READ_DONE:
 		if (token == USM_WRONG_TOKEN)
 			usf_xx->usf_state = USF_ERROR_STATE;
 		usf_xx->new_region = token;
 		wake_up(&usf_xx->wait);
 		break;
 
-	case USM_SESSION_EVENT_SIGNAL_DETECT_RESULT:
+	case Q6USM_EVENT_SIGNAL_DETECT_RESULT:
 		usf_xx->us_detect_type = (payload[APR_US_DETECT_RESULT_IND]) ?
 					USF_US_DETECT_YES :
 					USF_US_DETECT_NO;
@@ -416,12 +476,23 @@ static int config_xx(struct usf_xx_type *usf_xx, struct us_xx_info_type *config)
 {
 	int rc = 0;
 	uint16_t data_map_size = 0;
+	uint16_t min_map_size = 0;
 
 	if ((usf_xx == NULL) ||
 	    (config == NULL))
 		return -EINVAL;
 
+	if ((config->buf_size == 0) ||
+	    (config->buf_size > USF_MAX_BUF_SIZE) ||
+	    (config->buf_num == 0) ||
+	    (config->buf_num > USF_MAX_BUF_NUM)) {
+		pr_err("%s: wrong params: buf_size=%d; buf_num=%d\n",
+		       __func__, config->buf_size, config->buf_num);
+		return -EINVAL;
+	}
+
 	data_map_size = sizeof(usf_xx->encdec_cfg.cfg_common.data_map);
+	min_map_size = min(data_map_size, config->port_cnt);
 
 	if (config->client_name != NULL) {
 		if (strncpy_from_user(usf_xx->client_name,
@@ -440,22 +511,20 @@ static int config_xx(struct usf_xx_type *usf_xx, struct us_xx_info_type *config)
 		__func__, config->buf_num, config->stream_format,
 		config->port_cnt, config->params_data_size);
 
-	pr_debug("%s: p_id[0]=%d, p_id[1]=%d, p_id[2]=%d, p_id[3]=%d\n",
+	pr_debug("%s: id[0]=%d, id[1]=%d, id[2]=%d, id[3]=%d, id[4]=%d,\n",
 		__func__,
 		config->port_id[0],
 		config->port_id[1],
 		config->port_id[2],
-		config->port_id[3]);
+		config->port_id[3],
+		config->port_id[4]);
 
-	if (data_map_size < config->port_cnt) {
-		pr_err("%s: number of supported ports:%d < requested:%d\n",
-			__func__,
-			data_map_size,
-			config->port_cnt);
-		return -EINVAL;
-	}
+	pr_debug("id[5]=%d, id[6]=%d, id[7]=%d\n",
+		config->port_id[5],
+		config->port_id[6],
+		config->port_id[7]);
 
-	
+	/* q6usm allocation & configuration */
 	usf_xx->buffer_size = config->buf_size;
 	usf_xx->buffer_count = config->buf_num;
 	usf_xx->encdec_cfg.cfg_common.bits_per_sample =
@@ -467,7 +536,8 @@ static int config_xx(struct usf_xx_type *usf_xx, struct us_xx_info_type *config)
 	usf_xx->encdec_cfg.cfg_common.ch_cfg = config->port_cnt;
 	memcpy((void *)&usf_xx->encdec_cfg.cfg_common.data_map,
 	       (void *)config->port_id,
-	       config->port_cnt);
+	       min_map_size);
+
 	if (rc) {
 		pr_err("%s: ports offsets copy failure\n", __func__);
 		return -EINVAL;
@@ -588,12 +658,6 @@ static int register_input_device(struct usf_type *usf_info,
 		return -EINVAL;
 	}
 
-	if (input_info->event_src < ARRAY_SIZE(s_event_src_map))
-		usf_info->event_src =
-			s_event_src_map[input_info->event_src];
-	else
-		usf_info->event_src = 0;
-
 	for (ind = 0; ind < USF_MAX_EVENT_IND; ++ind) {
 		if (usf_info->input_ifs[ind] != NULL) {
 			pr_err("%s: input_if[%d] is already allocated\n",
@@ -610,12 +674,6 @@ static int register_input_device(struct usf_type *usf_info,
 				s_usf_input_devs[ind].input_dev_name);
 			if (rc)
 				return rc;
-
-
-			if (usf_info->event_src)
-				input_set_capability(usf_info->input_ifs[ind],
-						     EV_KEY,
-						     usf_info->event_src);
 
 			rc = input_register_device(usf_info->input_ifs[ind]);
 			if (rc) {
@@ -733,6 +791,7 @@ static int usf_set_us_detection(struct usf_type *usf, unsigned long arg)
 {
 	uint32_t timeout = 0;
 	struct us_detect_info_type detect_info;
+	struct usm_session_cmd_detect_info *p_allocated_memory = NULL;
 	struct usm_session_cmd_detect_info usm_detect_info;
 	struct usm_session_cmd_detect_info *p_usm_detect_info =
 						&usm_detect_info;
@@ -759,12 +818,13 @@ static int usf_set_us_detection(struct usf_type *usf, unsigned long arg)
 		uint8_t *p_data = NULL;
 
 		detect_info_size += detect_info.params_data_size;
-		p_usm_detect_info = kzalloc(detect_info_size, GFP_KERNEL);
-		if (p_usm_detect_info == NULL) {
+		 p_allocated_memory = kzalloc(detect_info_size, GFP_KERNEL);
+		if (p_allocated_memory == NULL) {
 			pr_err("%s: detect_info[%d] allocation failed\n",
 			       __func__, detect_info_size);
 			return -ENOMEM;
 		}
+		p_usm_detect_info = p_allocated_memory;
 		p_data = (uint8_t *)p_usm_detect_info +
 			sizeof(struct usm_session_cmd_detect_info);
 
@@ -774,7 +834,7 @@ static int usf_set_us_detection(struct usf_type *usf, unsigned long arg)
 		if (rc) {
 			pr_err("%s: copy params from user; rc=%d\n",
 				__func__, rc);
-			kfree(p_usm_detect_info);
+			kfree(p_allocated_memory);
 			return -EFAULT;
 		}
 		p_usm_detect_info->algorithm_cfg_size =
@@ -791,9 +851,7 @@ static int usf_set_us_detection(struct usf_type *usf, unsigned long arg)
 				    p_usm_detect_info,
 				    detect_info_size);
 	if (rc || (detect_info.detect_timeout == USF_NO_WAIT_TIMEOUT)) {
-		if (detect_info_size >
-		    sizeof(struct usm_session_cmd_detect_info))
-			kfree(p_usm_detect_info);
+		kfree(p_allocated_memory);
 		return rc;
 	}
 
@@ -812,29 +870,28 @@ static int usf_set_us_detection(struct usf_type *usf, unsigned long arg)
 					(usf_xx->us_detect_type !=
 					 USF_US_DETECT_UNDEF),
 					timeout);
-	
-	if (rc < 0) {
+	/* In the case of timeout, "no US" is assumed */
+	if (rc < 0)
 		pr_err("%s: Getting US detection failed rc[%d]\n",
 		       __func__, rc);
-		return rc;
+	else {
+		usf->usf_rx.us_detect_type = usf->usf_tx.us_detect_type;
+		detect_info.is_us =
+			(usf_xx->us_detect_type == USF_US_DETECT_YES);
+		rc = copy_to_user((void __user *)arg,
+				  &detect_info,
+				  sizeof(detect_info));
+		if (rc) {
+			pr_err("%s: copy detect_info to user; rc=%d\n",
+				__func__, rc);
+			rc = -EFAULT;
+		}
 	}
 
-	usf->usf_rx.us_detect_type = usf->usf_tx.us_detect_type;
-	detect_info.is_us = (usf_xx->us_detect_type == USF_US_DETECT_YES);
-	rc = copy_to_user((void __user *)arg,
-			  &detect_info,
-			  sizeof(detect_info));
-	if (rc) {
-		pr_err("%s: copy detect_info to user; rc=%d\n",
-			__func__, rc);
-		rc = -EFAULT;
-	}
-
-	if (detect_info_size > sizeof(struct usm_session_cmd_detect_info))
-		kfree(p_usm_detect_info);
+	kfree(p_allocated_memory);
 
 	return rc;
-} 
+} /* usf_set_us_detection */
 
 static int usf_set_tx_info(struct usf_type *usf, unsigned long arg)
 {
@@ -883,8 +940,10 @@ static int usf_set_tx_info(struct usf_type *usf, unsigned long arg)
 	rc = q6usm_us_client_buf_alloc(OUT, usf_xx->usc,
 				       usf_xx->buffer_size,
 				       usf_xx->buffer_count);
-	if (rc)
+	if (rc) {
+		(void)q6usm_cmd(usf_xx->usc, CMD_CLOSE);
 		return rc;
+	}
 
 	rc = q6usm_enc_cfg_blk(usf_xx->usc,
 			       &usf_xx->encdec_cfg);
@@ -894,7 +953,9 @@ static int usf_set_tx_info(struct usf_type *usf, unsigned long arg)
 					   &config_tx.input_info);
 	}
 
-	if (!rc)
+	if (rc)
+		(void)q6usm_cmd(usf_xx->usc, CMD_CLOSE);
+	else
 		usf_xx->usf_state = USF_CONFIGURED_STATE;
 
 	return rc;
@@ -928,19 +989,21 @@ static int usf_set_rx_info(struct usf_type *usf, unsigned long arg)
 	if (rc)
 		return rc;
 
-	if (usf_xx->buffer_size && usf_xx->buffer_count) {
-		rc = q6usm_us_client_buf_alloc(
-					IN,
-					usf_xx->usc,
-					usf_xx->buffer_size,
-					usf_xx->buffer_count);
-		if (rc)
-			return rc;
+	rc = q6usm_us_client_buf_alloc(
+				IN,
+				usf_xx->usc,
+				usf_xx->buffer_size,
+				usf_xx->buffer_count);
+	if (rc) {
+		(void)q6usm_cmd(usf_xx->usc, CMD_CLOSE);
+		return rc;
 	}
 
 	rc = q6usm_dec_cfg_blk(usf_xx->usc,
 			       &usf_xx->encdec_cfg);
-	if (!rc) {
+	if (rc)
+		(void)q6usm_cmd(usf_xx->usc, CMD_CLOSE);
+	else {
 		init_waitqueue_head(&usf_xx->wait);
 		usf_xx->usf_state = USF_CONFIGURED_STATE;
 	}
@@ -1029,8 +1092,7 @@ static int usf_get_tx_update(struct usf_type *usf, unsigned long arg)
 
 	if ((usf_xx->usf_state != USF_WORK_STATE) ||
 	    (rc == -ERESTARTSYS)) {
-		pr_err("%s: Getting ready region failed "
-			"work state[%d]; rc[%d]\n",
+		pr_err("%s: Get ready region failure; state[%d]; rc[%d]\n",
 		       __func__, usf_xx->usf_state, rc);
 		return -EINTR;
 	}
@@ -1117,13 +1179,12 @@ static void usf_release_input(struct usf_type *usf)
 {
 	uint16_t ind = 0;
 
+	usf_unregister_conflicting_events(
+					usf->conflicting_event_types);
+	usf->conflicting_event_types = 0;
 	for (ind = 0; ind < USF_MAX_EVENT_IND; ++ind) {
 		if (usf->input_ifs[ind] == NULL)
 			continue;
-
-		usf_unregister_conflicting_events(
-						usf->conflicting_event_types);
-		usf->conflicting_event_types = 0;
 		input_unregister_device(usf->input_ifs[ind]);
 		usf->input_ifs[ind] = NULL;
 		pr_debug("%s input_unregister_device[%s]\n",
@@ -1154,10 +1215,15 @@ static int usf_get_version(unsigned long arg)
 		return -EFAULT;
 	}
 
-	
+	if (version_info.buf_size < sizeof(DRV_VERSION)) {
+		pr_err("%s: buf_size (%d) < version string size (%d)\n",
+			__func__, version_info.buf_size, sizeof(DRV_VERSION));
+		return -EINVAL;
+	}
+
 	rc = copy_to_user(version_info.pbuf,
 			  DRV_VERSION,
-			  version_info.buf_size);
+			  sizeof(DRV_VERSION));
 	if (rc) {
 		pr_err("%s: copy to version_info.pbuf; rc=%d\n",
 			__func__, rc);
@@ -1174,7 +1240,7 @@ static int usf_get_version(unsigned long arg)
 	}
 
 	return rc;
-} 
+} /* usf_get_version */
 
 static long usf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -1446,4 +1512,3 @@ static int __init usf_init(void)
 device_initcall(usf_init);
 
 MODULE_DESCRIPTION("Ultrasound framework driver");
-MODULE_VERSION(DRV_VERSION);

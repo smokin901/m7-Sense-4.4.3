@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -61,60 +61,79 @@ enum us_detect_mode_enum {
 #define USF_TSC_PTR_EVENT_IND  1
 #define USF_MOUSE_EVENT_IND    2
 #define USF_KEYBOARD_EVENT_IND 3
-#define USF_MAX_EVENT_IND      4
+#define USF_TSC_EXT_EVENT_IND  4
+#define USF_MAX_EVENT_IND      5
 
 #define USF_NO_EVENT 0
 #define USF_TSC_EVENT      (1 << USF_TSC_EVENT_IND)
 #define USF_TSC_PTR_EVENT  (1 << USF_TSC_PTR_EVENT_IND)
 #define USF_MOUSE_EVENT    (1 << USF_MOUSE_EVENT_IND)
 #define USF_KEYBOARD_EVENT (1 << USF_KEYBOARD_EVENT_IND)
+#define USF_TSC_EXT_EVENT  (1 << USF_TSC_EXT_EVENT_IND)
 #define USF_ALL_EVENTS         (USF_TSC_EVENT |\
 				USF_TSC_PTR_EVENT |\
 				USF_MOUSE_EVENT |\
-				USF_KEYBOARD_EVENT)
+				USF_KEYBOARD_EVENT |\
+				USF_TSC_EXT_EVENT)
 
+/* min, max array dimension */
 #define MIN_MAX_DIM 2
 
+/* coordinates (x,y,z) array dimension */
 #define COORDINATES_DIM 3
 
+/* tilts (x,y) array dimension */
 #define TILTS_DIM 2
 
+/* Max size of the client name */
 #define USF_MAX_CLIENT_NAME_SIZE	20
+
+/* Max number of the ports (mics/speakers) */
+#define USF_MAX_PORT_NUM                8
+
+/* Info structure common for TX and RX */
 struct us_xx_info_type {
+/* Input:  general info */
+/* Name of the client - event calculator */
 	const char *client_name;
+/* Selected device identification, accepted in the kernel's CAD */
 	uint32_t dev_id;
+/* 0 - point_epos type; (e.g. 1 - gr_mmrd) */
 	uint32_t stream_format;
+/* Required sample rate in Hz */
 	uint32_t sample_rate;
+/* Size of a buffer (bytes) for US data transfer between the module and USF */
 	uint32_t buf_size;
+/* Number of the buffers for the US data transfer */
 	uint16_t buf_num;
+/* Number of the microphones (TX) or speakers(RX) */
 	uint16_t port_cnt;
-	uint8_t  port_id[4];
+/* Microphones(TX) or speakers(RX) indexes in their enumeration */
+	uint8_t  port_id[USF_MAX_PORT_NUM];
+/* Bits per sample 16 or 32 */
 	uint16_t bits_per_sample;
+/* Input:  Transparent info for encoder in the LPASS */
+/* Parameters data size in bytes */
 	uint16_t params_data_size;
+/* Pointer to the parameters */
 	uint8_t *params_data;
 };
 
-enum us_input_event_src_type {
-	US_INPUT_SRC_PEN,
-	US_INPUT_SRC_FINGER,
-	US_INPUT_SRC_UNDEF
-};
-
 struct us_input_info_type {
-	
+	/* Touch screen dimensions: min & max;for input module */
 	int tsc_x_dim[MIN_MAX_DIM];
 	int tsc_y_dim[MIN_MAX_DIM];
 	int tsc_z_dim[MIN_MAX_DIM];
-	
+	/* Touch screen tilt dimensions: min & max;for input module */
 	int tsc_x_tilt[MIN_MAX_DIM];
 	int tsc_y_tilt[MIN_MAX_DIM];
-	
+	/* Touch screen pressure limits: min & max; for input module */
 	int tsc_pressure[MIN_MAX_DIM];
-	
+	/* The requested buttons bitmap */
+	uint16_t req_buttons_bitmap;
+	/* Bitmap of types of events (USF_X_EVENT), produced by calculator */
 	uint16_t event_types;
-	
-	enum us_input_event_src_type event_src;
-	
+	/* Bitmap of types of events from devs, conflicting with USF */
 	uint16_t conflicting_event_types;
 };
 
@@ -136,6 +155,8 @@ struct point_event_type {
 	
 	int inclinations[TILTS_DIM];
 	uint32_t pressure;
+/* Bitmap for button state. 1 - down, 0 - up */
+	uint16_t buttons_state_bitmap;
 };
 
 #define USF_BUTTON_LEFT_MASK   1

@@ -1118,12 +1118,14 @@ static const struct snd_soc_dapm_route apq8064_liquid_cdp_audio_map[] = {
 
 static const char *spk_function[] = {"Off", "On"};
 static const char *slim0_rx_ch_text[] = {"One", "Two"};
-static const char *slim0_tx_ch_text[] = {"One", "Two", "Three", "Four"};
+static const char *slim0_tx_ch_text[] = {"One", "Two", "Three", "Four",
+					 "Five", "Six", "Seven",
+					 "Eight"};
 
 static const struct soc_enum msm_enum[] = {
 	SOC_ENUM_SINGLE_EXT(2, spk_function),
 	SOC_ENUM_SINGLE_EXT(2, slim0_rx_ch_text),
-	SOC_ENUM_SINGLE_EXT(4, slim0_tx_ch_text),
+	SOC_ENUM_SINGLE_EXT(8, slim0_tx_ch_text),
 };
 
 static const char *btsco_rate_text[] = {"8000", "16000"};
